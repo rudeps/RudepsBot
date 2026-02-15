@@ -5,13 +5,13 @@
 
 import time
 import os
-import threading
-import schedule
+import asyncio
+import aioschedule
 from datetime import datetime
 from typing import Optional, Dict
 
-import telebot
-from telebot import types
+from aiogram import types
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
 from config import (
     ANTIFLOOD_SECONDS, BOT_NAME, WEEKLY_COMMENT_DECREMENT,
@@ -82,48 +82,48 @@ def check_flood(user_id: int, last_photo_time: dict, antiflood_seconds: int) -> 
     return True
 
 
-def get_main_keyboard(is_blocked: bool = False) -> types.ReplyKeyboardMarkup:
+def get_main_keyboard(is_blocked: bool = False) -> ReplyKeyboardMarkup:
     """
     Создание клавиатуры главного меню
     
     Args:
         is_blocked: заблокирован ли пользователь
     """
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
 
     if is_blocked:
         # Для заблокированных - только кнопка проверки комментария
-        markup.add(types.KeyboardButton("📝 Проверить комментарий"))
+        markup.add(KeyboardButton("📝 Проверить комментарий"))
     else:
         # Для разблокированных - полное меню
         buttons = [
-            types.KeyboardButton("📝 Проверить комментарий"),
-            types.KeyboardButton("💰 Мой баланс"),
-            types.KeyboardButton("💎 Вывод средств"),
-            types.KeyboardButton("📊 Статистика"),
-            types.KeyboardButton("❓ Помощь")
+            KeyboardButton("📝 Проверить комментарий"),
+            KeyboardButton("💰 Мой баланс"),
+            KeyboardButton("💎 Вывод средств"),
+            KeyboardButton("📊 Статистика"),
+            KeyboardButton("❓ Помощь")
         ]
         markup.add(*buttons)
 
     return markup
 
 
-def get_admin_keyboard() -> types.ReplyKeyboardMarkup:
+def get_admin_keyboard() -> ReplyKeyboardMarkup:
     """Создание клавиатуры админ-панели"""
-    markup = types.ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
+    markup = ReplyKeyboardMarkup(resize_keyboard=True, row_width=2)
     buttons = [
-        "👥 Рассылка",
-        "💰 Управление балансами",
-        "📊 Статистика",
-        "📤 Экспорт ID",
-        "🔧 Тикеты на выплату",
-        "🔙 Назад в меню"
+        KeyboardButton("👥 Рассылка"),
+        KeyboardButton("💰 Управление балансами"),
+        KeyboardButton("📊 Статистика"),
+        KeyboardButton("📤 Экспорт ID"),
+        KeyboardButton("🔧 Тикеты на выплату"),
+        KeyboardButton("🔙 Назад в меню")
     ]
     markup.add(*buttons)
     return markup
 
 
-def send_main_menu(chat_id: int, user_id: int, bot, db):
+async def send_main_menu(chat_id: int, user_id: int, bot, db):
     """Отправка главного меню"""
     blocked = db.is_user_blocked(user_id)
     markup = get_main_keyboard(blocked)
@@ -137,9 +137,9 @@ def send_main_menu(chat_id: int, user_id: int, bot, db):
             f"⏳ Осталось для разблокировки: {remaining}\n\n"
             f"Отправляйте скриншоты с упоминанием @{BOT_NAME} чтобы получить комментарии!"
         )
-        bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
+        await bot.send_message(chat_id, text, reply_markup=markup)
     else:
-        bot.send_message(chat_id, "Главное меню:", reply_markup=markup)
+        await bot.send_message(chat_id, "Главное меню:", reply_markup=markup)
 
 
 def get_user_display_name(user: Dict) -> str:
@@ -158,9 +158,10 @@ def get_user_display_name(user: Dict) -> str:
 
 # ===== Планировщик =====
 
-def weekly_check(bot, db):
+async def weekly_check(bot, db):
     """Еженедельная проверка и списание комментариев"""
-    from globals import logger
+    from logger import setup_logging
+    logger = setup_logging()
     
     logger.info("Запуск еженедельного списания комментариев")
 
@@ -169,14 +170,13 @@ def weekly_check(bot, db):
     # Отправляем уведомления заблокированным пользователям
     for user_id, new_balance in blocked_users:
         try:
-            bot.send_message(
+            await bot.send_message(
                 user_id,
                 f"⛔ *ВНИМАНИЕ: доступ заблокирован!*\n\n"
                 f"Произошло еженедельное списание {WEEKLY_COMMENT_DECREMENT} комментариев.\n"
-                f"Ваш баланс стал 0.\n\n"
+                f"Ваш баланс стал {new_balance}.\n\n"
                 f"Чтобы разблокировать доступ, наберите {COMMENT_THRESHOLD} комментариев "
                 f"через кнопку '📝 Проверить комментарий'.",
-                parse_mode="Markdown",
                 reply_markup=get_main_keyboard(True)
             )
         except Exception as e:
@@ -185,15 +185,16 @@ def weekly_check(bot, db):
     logger.info(f"Еженедельное списание завершено. Заблокировано: {len(blocked_users)}")
 
 
-def run_schedule(bot, db):
-    """Запуск планировщика в отдельном потоке"""
-    import schedule
-    import time
+async def run_schedule_async(bot, db):
+    """Запуск планировщика"""
+    import aioschedule
+    import asyncio
     
-    schedule.every().monday.at(SCHEDULE_TIME).do(weekly_check, bot, db)
+    aioschedule.every().monday.at(SCHEDULE_TIME).do(weekly_check, bot, db)
+    
     while True:
-        schedule.run_pending()
-        time.sleep(60)
+        await aioschedule.run_pending()
+        await asyncio.sleep(60)
 
 
 def export_all_user_ids_to_file(db, filename: str = "user_ids.txt") -> str:
