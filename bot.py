@@ -31,7 +31,7 @@ import aioschedule
 @dataclass
 class Config:
     """Конфигурация бота"""
-    BOT_TOKEN: str = "8526526327:AAF0FHqly8li_q6YDH36ilhSsDhUz5_fCl0"
+    BOT_TOKEN: str = "8287158555:AAGFJPPnaA9pRnicmQRJG6_jO63GWNfCvAk"
     ADMIN_IDS: List[int] = field(default_factory=lambda: [8286237801])
     BOT_NAME: str = "RudepsBot"
     DATABASE_FILE: str = "bot_database.db"
