@@ -1,5 +1,5 @@
 aiogram==2.25.1
 python-dotenv==1.0.0
-easyocr==1.7.1
 aioschedule==0.5.2
 aiofiles==23.2.1
+
