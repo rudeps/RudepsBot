@@ -3,60 +3,141 @@
 Общие обработчики для пользователей
 """
 
-from telebot import types
-import globals
+from aiogram import types, Dispatcher
+from aiogram.dispatcher import FSMContext
+from aiogram.dispatcher.filters import Text
+from aiogram.types import ParseMode, InlineKeyboardMarkup, InlineKeyboardButton
+
 from utils import (
     send_main_menu, get_main_keyboard, is_admin, get_admin_keyboard,
     get_user_display_name
 )
 from config import MIN_WITHDRAW_CARD, MIN_WITHDRAW_PHONE, WEEKLY_COMMENT_DECREMENT, BOT_NAME, COMMENT_THRESHOLD
 
-bot = globals.bot
-db = globals.db
-user_state = globals.user_state
-logger = globals.logger
 
+def register_handlers(dp: Dispatcher, bot, db, user_state, reader, last_photo_time):
+    """Регистрация обработчиков"""
+    
+    @dp.message_handler(commands=['start'])
+    async def cmd_start(message: types.Message):
+        user_id = message.from_user.id
+        username = message.from_user.username
+        first_name = message.from_user.first_name
+        last_name = message.from_user.last_name
 
-@bot.message_handler(commands=['start'])
-def cmd_start(message: types.Message):
-    """Обработчик команды /start"""
-    user_id = message.from_user.id
-    username = message.from_user.username
-    first_name = message.from_user.first_name
-    last_name = message.from_user.last_name
+        user = db.get_user(user_id)
 
-    user = db.get_user(user_id)
-
-    if user:
-        if user['accepted_rules']:
-            db.update_user_activity(user_id)
-            # Проверяем статус блокировки
-            if user['is_blocked']:
-                # Если заблокирован - показываем только кнопку проверки
-                markup = get_main_keyboard(True)
-                bot.send_message(
-                    message.chat.id,
-                    "🔒 Доступ заблокирован. Требуется 10 комментариев для разблокировки.",
-                    reply_markup=markup
-                )
+        if user:
+            if user['accepted_rules']:
+                db.update_user_activity(user_id)
+                if user['is_blocked']:
+                    markup = get_main_keyboard(True)
+                    await bot.send_message(
+                        message.chat.id,
+                        "🔒 Доступ заблокирован. Требуется 10 комментариев для разблокировки.",
+                        reply_markup=markup
+                    )
+                else:
+                    await send_main_menu(message.chat.id, user_id, bot, db)
             else:
-                send_main_menu(message.chat.id, user_id, bot, db)
+                await show_rules(message.chat.id, bot)
         else:
-            show_rules(message.chat.id)
-    else:
-        db.create_user(user_id, username, first_name, last_name)
-        show_rules(message.chat.id)
+            db.create_user(user_id, username, first_name, last_name)
+            await show_rules(message.chat.id, bot)
+
+    @dp.message_handler(commands=['admin'])
+    async def cmd_admin(message: types.Message):
+        user_id = message.from_user.id
+
+        if is_admin(user_id, db):
+            await bot.send_message(message.chat.id, "🔧 Админ-панель", reply_markup=get_admin_keyboard())
+        else:
+            await bot.send_message(message.chat.id, "У вас нет прав администратора.")
+
+    @dp.message_handler(commands=['stats'])
+    async def cmd_stats(message: types.Message):
+        user_id = message.from_user.id
+        user = db.get_user(user_id)
+
+        if user:
+            status = "🔒 Заблокирован" if user['is_blocked'] else "✅ Разблокирован"
+            remaining = max(0, COMMENT_THRESHOLD - user['comment_balance']) if user['is_blocked'] else 0
+            
+            text = (
+                f"📊 *Твоя статистика:*\n"
+                f"📅 Дата регистрации: {user['registration_date']}\n"
+                f"💬 Всего комментариев: {user['total_comments_ever']}\n"
+                f"📝 Текущий баланс комментариев: {user['comment_balance']}\n"
+                f"🔒 Статус доступа: {status}\n"
+            )
+            
+            if user['is_blocked']:
+                text += f"⏳ Осталось для разблокировки: {remaining}\n"
+            
+            text += (
+                f"✅ Выполнено заданий: {user['tasks_completed']}\n"
+                f"💰 Заработано денег: {user['money_balance']} руб."
+            )
+        else:
+            text = "Статистика недоступна."
+
+        await bot.send_message(message.chat.id, text, parse_mode=ParseMode.MARKDOWN)
+
+    @dp.message_handler(commands=['help'])
+    async def cmd_help(message: types.Message):
+        await send_help(message, bot)
+
+    @dp.message_handler(lambda message: message.text in [
+        "📝 Проверить комментарий", "💰 Мой баланс", "💎 Вывод средств",
+        "📊 Статистика", "❓ Помощь"
+    ])
+    async def handle_menu_buttons(message: types.Message):
+        user_id = message.from_user.id
+
+        user = db.get_user(user_id)
+        if not user or not user['accepted_rules']:
+            await bot.send_message(message.chat.id, "Пожалуйста, используйте /start для начала.")
+            return
+
+        db.update_user_activity(user_id)
+
+        if db.is_user_blocked(user_id):
+            if message.text == "📝 Проверить комментарий":
+                from handlers.comment import handle_check_comment
+                await handle_check_comment(message, bot, db, user_state, reader, last_photo_time)
+            else:
+                remaining = max(0, COMMENT_THRESHOLD - user['comment_balance'])
+                await bot.send_message(
+                    message.chat.id,
+                    f"⛔ Доступ заблокирован. Требуется {COMMENT_THRESHOLD} комментариев.\n"
+                    f"📝 Текущий баланс: {user['comment_balance']}\n"
+                    f"⏳ Осталось: {remaining}",
+                    reply_markup=get_main_keyboard(True)
+                )
+            return
+
+        if message.text == "📝 Проверить комментарий":
+            from handlers.comment import handle_check_comment
+            await handle_check_comment(message, bot, db, user_state, reader, last_photo_time)
+        elif message.text == "💰 Мой баланс":
+            await show_balance(message, bot, db)
+        elif message.text == "💎 Вывод средств":
+            from handlers.withdraw import start_withdrawal
+            await start_withdrawal(message, bot, db, user_state)
+        elif message.text == "📊 Статистика":
+            await cmd_stats(message)
+        elif message.text == "❓ Помощь":
+            await send_help(message, bot)
 
 
-def show_rules(chat_id: int):
+async def show_rules(chat_id: int, bot):
     """Показать правила и запросить согласие"""
-    markup = types.InlineKeyboardMarkup()
+    markup = InlineKeyboardMarkup()
     markup.add(
-        types.InlineKeyboardButton("✅ Принимаю", callback_data="accept_rules"),
-        types.InlineKeyboardButton("❌ Отказываюсь", callback_data="reject_rules")
+        InlineKeyboardButton("✅ Принимаю", callback_data="accept_rules"),
+        InlineKeyboardButton("❌ Отказываюсь", callback_data="reject_rules")
     )
     
-    # Расширенное сообщение с функционалом и заработками
     text = (
         "🤖 *Добро пожаловать в RudepsBot!*\n\n"
         "📱 *Что умеет бот:*\n"
@@ -84,142 +165,10 @@ def show_rules(chat_id: int):
         "⚠️ *Перед началом работы ознакомьтесь с условиями использования*"
     )
     
-    bot.send_message(chat_id, text, parse_mode="Markdown", reply_markup=markup)
+    await bot.send_message(chat_id, text, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
 
 
-@bot.callback_query_handler(func=lambda call: call.data in ["accept_rules", "reject_rules"])
-def callback_rules(call: types.CallbackQuery):
-    """Обработчик согласия/отказа с правилами"""
-    user_id = call.from_user.id
-
-    if call.data == "accept_rules":
-        db.set_accepted_rules(user_id)
-        bot.answer_callback_query(call.id, "Спасибо! Добро пожаловать.")
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-        
-        # Отправляем сообщение о необходимости рекламы и разблокировки
-        markup = get_main_keyboard(True)  # Только кнопка проверки, т.к. заблокирован
-        
-        promo_text = (
-            "📢 *Для получения спонсорских предложений вы должны предварительно прорекламировать бота!*\n\n"
-            f"Чтобы разблокировать доступ ко всем функциям бота, необходимо набрать {COMMENT_THRESHOLD} комментариев.\n\n"
-            "Как это работает:\n"
-            "1️⃣ Отправляйте коментарии в TikTok по типу \"Бригада: Waossx выдал\" или на ваше усмотрение.\n"
-            "2️⃣ Отправьте скриншот через кнопку ниже\n"
-            "3️⃣ Получите +1 комментарий к балансу\n\n"
-            f"После набора {COMMENT_THRESHOLD} комментариев доступ будет автоматически разблокирован!\n\n"
-            "👇 *Нажмите кнопку ниже, чтобы начать*"
-        )
-        
-        bot.send_message(
-            call.message.chat.id, 
-            promo_text, 
-            parse_mode="Markdown",
-            reply_markup=markup
-        )
-    else:
-        bot.answer_callback_query(call.id, "Доступ закрыт.")
-        bot.send_message(call.message.chat.id, "Доступ закрыт.")
-        bot.delete_message(call.message.chat.id, call.message.message_id)
-
-
-@bot.message_handler(commands=['admin'])
-def cmd_admin(message: types.Message):
-    """Обработчик команды /admin"""
-    user_id = message.from_user.id
-
-    if is_admin(user_id, db):
-        bot.send_message(message.chat.id, "🔧 Админ-панель", reply_markup=get_admin_keyboard())
-    else:
-        bot.send_message(message.chat.id, "У вас нет прав администратора.")
-
-
-@bot.message_handler(commands=['stats'])
-def cmd_stats(message: types.Message):
-    """Обработчик команды /stats - личная статистика"""
-    user_id = message.from_user.id
-    user = db.get_user(user_id)
-
-    if user:
-        status = "🔒 Заблокирован" if user['is_blocked'] else "✅ Разблокирован"
-        remaining = max(0, COMMENT_THRESHOLD - user['comment_balance']) if user['is_blocked'] else 0
-        
-        text = (
-            f"📊 *Твоя статистика:*\n"
-            f"📅 Дата регистрации: {user['registration_date']}\n"
-            f"💬 Всего комментариев: {user['total_comments_ever']}\n"
-            f"📝 Текущий баланс комментариев: {user['comment_balance']}\n"
-            f"🔒 Статус доступа: {status}\n"
-        )
-        
-        if user['is_blocked']:
-            text += f"⏳ Осталось для разблокировки: {remaining}\n"
-        
-        text += (
-            f"✅ Выполнено заданий: {user['tasks_completed']}\n"
-            f"💰 Заработано денег: {user['money_balance']} руб."
-        )
-    else:
-        text = "Статистика недоступна."
-
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
-
-
-@bot.message_handler(commands=['help'])
-def cmd_help(message: types.Message):
-    """Обработчик команды /help"""
-    send_help(message)
-
-
-@bot.message_handler(func=lambda message: message.text in [
-    "📝 Проверить комментарий", "💰 Мой баланс", "💎 Вывод средств",
-    "📊 Статистика", "❓ Помощь"
-])
-def handle_menu_buttons(message: types.Message):
-    """Обработчик кнопок главного меню"""
-    user_id = message.from_user.id
-
-    # Проверяем, принял ли пользователь правила
-    user = db.get_user(user_id)
-    if not user or not user['accepted_rules']:
-        bot.send_message(message.chat.id, "Пожалуйста, используйте /start для начала.")
-        return
-
-    db.update_user_activity(user_id)
-
-    # Проверяем блокировку
-    if db.is_user_blocked(user_id):
-        if message.text == "📝 Проверить комментарий":
-            from handlers.comment import handle_check_comment
-            handle_check_comment(message)
-        else:
-            # Показываем сколько осталось для разблокировки
-            remaining = max(0, COMMENT_THRESHOLD - user['comment_balance'])
-            bot.send_message(
-                message.chat.id,
-                f"⛔ Доступ заблокирован. Требуется {COMMENT_THRESHOLD} комментариев.\n"
-                f"📝 Текущий баланс: {user['comment_balance']}\n"
-                f"⏳ Осталось: {remaining}",
-                reply_markup=get_main_keyboard(True)
-            )
-        return
-
-    # Обработка кнопок для разблокированных пользователей
-    if message.text == "📝 Проверить комментарий":
-        from handlers.comment import handle_check_comment
-        handle_check_comment(message)
-    elif message.text == "💰 Мой баланс":
-        show_balance(message)
-    elif message.text == "💎 Вывод средств":
-        from handlers.withdraw import start_withdrawal
-        start_withdrawal(message)
-    elif message.text == "📊 Статистика":
-        cmd_stats(message)
-    elif message.text == "❓ Помощь":
-        send_help(message)
-
-
-def show_balance(message: types.Message):
+async def show_balance(message: types.Message, bot, db):
     """Показать баланс пользователя"""
     user_id = message.from_user.id
     user = db.get_user(user_id)
@@ -244,10 +193,10 @@ def show_balance(message: types.Message):
     else:
         text = "Ошибка получения данных."
 
-    bot.send_message(message.chat.id, text, parse_mode="Markdown")
+    await bot.send_message(message.chat.id, text, parse_mode=ParseMode.MARKDOWN)
 
 
-def send_help(message: types.Message):
+async def send_help(message: types.Message, bot):
     """Отправить справку"""
     help_text = (
         f"❓ *Помощь по боту {BOT_NAME}:*\n\n"
@@ -266,4 +215,4 @@ def send_help(message: types.Message):
         f"📢 *Важно:* Для получения спонсорских предложений нужно "
         f"предварительно прорекламировать бота!"
     )
-    bot.send_message(message.chat.id, help_text, parse_mode="Markdown")
+    await bot.send_message(message.chat.id, help_text, parse_mode=ParseMode.MARKDOWN)
