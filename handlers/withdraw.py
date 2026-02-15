@@ -1,142 +1,216 @@
 # -*- coding: utf-8 -*-
 """
-Обработчики для вывода средств
+Общие обработчики для пользователей
 """
 
 from aiogram import types, Dispatcher
-from aiogram.dispatcher import FSMContext
-from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.types import ParseMode, InlineKeyboardMarkup, InlineKeyboardButton
 
-from config import MIN_WITHDRAW_CARD, MIN_WITHDRAW_PHONE, ADMIN_IDS
+from utils import (
+    send_main_menu, get_main_keyboard, is_admin, get_admin_keyboard,
+    get_user_display_name
+)
+from config import MIN_WITHDRAW_CARD, MIN_WITHDRAW_PHONE, WEEKLY_COMMENT_DECREMENT, BOT_NAME, COMMENT_THRESHOLD
 
 
-async def start_withdrawal(message: types.Message, bot, db, user_state):
-    """Начать процесс вывода средств"""
-    user_id = message.from_user.id
-    money = db.get_money_balance(user_id)
+def register_handlers(dp: Dispatcher, bot, db, user_state, reader, last_photo_time):
+    """Регистрация обработчиков"""
+    
+    @dp.message_handler(commands=['start'])
+    async def cmd_start(message: types.Message):
+        user_id = message.from_user.id
+        username = message.from_user.username
+        first_name = message.from_user.first_name
+        last_name = message.from_user.last_name
 
-    if money < MIN_WITHDRAW_CARD:
-        await bot.send_message(
-            message.chat.id,
-            f"💤 Минимальная сумма вывода — {MIN_WITHDRAW_CARD}₽. Твой баланс: {money}₽"
-        )
-        return
+        user = db.get_user(user_id)
 
-    markup = InlineKeyboardMarkup(row_width=2)
+        if user:
+            if user['accepted_rules']:
+                db.update_user_activity(user_id)
+                if user['is_blocked']:
+                    markup = get_main_keyboard(True)
+                    await bot.send_message(
+                        message.chat.id,
+                        "🔒 Доступ заблокирован. Требуется 10 комментариев для разблокировки.",
+                        reply_markup=markup
+                    )
+                else:
+                    await send_main_menu(message.chat.id, user_id, bot, db)
+            else:
+                await show_rules(message.chat.id, bot)
+        else:
+            db.create_user(user_id, username, first_name, last_name)
+            await show_rules(message.chat.id, bot)
+
+    @dp.message_handler(commands=['admin'])
+    async def cmd_admin(message: types.Message):
+        user_id = message.from_user.id
+
+        if is_admin(user_id, db):
+            await bot.send_message(message.chat.id, "🔧 Админ-панель", reply_markup=get_admin_keyboard())
+        else:
+            await bot.send_message(message.chat.id, "У вас нет прав администратора.")
+
+    @dp.message_handler(commands=['stats'])
+    async def cmd_stats(message: types.Message):
+        user_id = message.from_user.id
+        user = db.get_user(user_id)
+
+        if user:
+            status = "🔒 Заблокирован" if user['is_blocked'] else "✅ Разблокирован"
+            remaining = max(0, COMMENT_THRESHOLD - user['comment_balance']) if user['is_blocked'] else 0
+            
+            text = (
+                f"📊 *Твоя статистика:*\n"
+                f"📅 Дата регистрации: {user['registration_date']}\n"
+                f"💬 Всего комментариев: {user['total_comments_ever']}\n"
+                f"📝 Текущий баланс комментариев: {user['comment_balance']}\n"
+                f"🔒 Статус доступа: {status}\n"
+            )
+            
+            if user['is_blocked']:
+                text += f"⏳ Осталось для разблокировки: {remaining}\n"
+            
+            text += (
+                f"✅ Выполнено заданий: {user['tasks_completed']}\n"
+                f"💰 Заработано денег: {user['money_balance']} руб."
+            )
+        else:
+            text = "Статистика недоступна."
+
+        await bot.send_message(message.chat.id, text, parse_mode=ParseMode.MARKDOWN)
+
+    @dp.message_handler(commands=['help'])
+    async def cmd_help(message: types.Message):
+        await send_help(message, bot)
+
+    @dp.message_handler(lambda message: message.text in [
+        "📝 Проверить комментарий", "💰 Мой баланс", "💎 Вывод средств",
+        "📊 Статистика", "❓ Помощь"
+    ])
+    async def handle_menu_buttons(message: types.Message):
+        user_id = message.from_user.id
+
+        user = db.get_user(user_id)
+        if not user or not user['accepted_rules']:
+            await bot.send_message(message.chat.id, "Пожалуйста, используйте /start для начала.")
+            return
+
+        db.update_user_activity(user_id)
+
+        if db.is_user_blocked(user_id):
+            if message.text == "📝 Проверить комментарий":
+                from handlers.comment import handle_check_comment
+                await handle_check_comment(message, bot, db, user_state, reader, last_photo_time)
+            else:
+                remaining = max(0, COMMENT_THRESHOLD - user['comment_balance'])
+                await bot.send_message(
+                    message.chat.id,
+                    f"⛔ Доступ заблокирован. Требуется {COMMENT_THRESHOLD} комментариев.\n"
+                    f"📝 Текущий баланс: {user['comment_balance']}\n"
+                    f"⏳ Осталось: {remaining}",
+                    reply_markup=get_main_keyboard(True)
+                )
+            return
+
+        if message.text == "📝 Проверить комментарий":
+            from handlers.comment import handle_check_comment
+            await handle_check_comment(message, bot, db, user_state, reader, last_photo_time)
+        elif message.text == "💰 Мой баланс":
+            await show_balance(message, bot, db)
+        elif message.text == "💎 Вывод средств":
+            from handlers.withdraw import start_withdrawal
+            await start_withdrawal(message, bot, db, user_state)
+        elif message.text == "📊 Статистика":
+            await cmd_stats(message)
+        elif message.text == "❓ Помощь":
+            await send_help(message, bot)
+
+
+async def show_rules(chat_id: int, bot):
+    """Показать правила и запросить согласие"""
+    markup = InlineKeyboardMarkup()
     markup.add(
-        InlineKeyboardButton("1️⃣ На карту", callback_data="withdraw_card"),
-        InlineKeyboardButton("2️⃣ На баланс телефона", callback_data="withdraw_phone")
+        InlineKeyboardButton("✅ Принимаю", callback_data="accept_rules"),
+        InlineKeyboardButton("❌ Отказываюсь", callback_data="reject_rules")
     )
-    await bot.send_message(message.chat.id, "Выберите способ вывода:", reply_markup=markup)
-
-
-async def callback_withdraw_method(call: types.CallbackQuery, bot, db, user_state):
-    """Выбор способа вывода"""
-    user_id = call.from_user.id
-    method = call.data.split('_')[1]
-
-    user_state.set_state(user_id, 'waiting_withdraw_amount', method=method)
-    await bot.answer_callback_query(call.id)
-
-    min_amount = MIN_WITHDRAW_CARD if method == 'card' else MIN_WITHDRAW_PHONE
-    await bot.send_message(
-        call.message.chat.id,
-        f"Введите сумму для вывода (минимум {min_amount}₽, целое число):"
+    
+    text = (
+        "🤖 *Добро пожаловать в RudepsBot!*\n\n"
+        "📱 *Что умеет бот:*\n"
+        "• Проверка комментариев с упоминанием @" + BOT_NAME + "\n"
+        "• Накопление комментариев для доступа\n"
+        "• Выполнение заданий с наградой\n"
+        "• Вывод заработанных средств\n\n"
+        
+        "💰 *Примерные заработки:*\n"
+        "• За каждое задание: от 5 до 50₽\n"
+        "• В среднем: 500-1500₽ в неделю\n"
+        "• Максимальный заработок: до 5000₽/неделю\n\n"
+        
+        "📊 *Система комментариев:*\n"
+        f"• Для разблокировки нужно {COMMENT_THRESHOLD} комментариев\n"
+        f"• Каждый понедельник списывается {WEEKLY_COMMENT_DECREMENT} комментариев\n"
+        "• Если баланс станет 0 - доступ блокируется\n"
+        "• Комментарии можно получать за скриншоты\n\n"
+        
+        "💳 *Вывод средств:*\n"
+        f"• На карту: от {MIN_WITHDRAW_CARD}₽\n"
+        f"• На телефон: от {MIN_WITHDRAW_PHONE}₽\n"
+        "• Вывод в течение 24 часов\n\n"
+        
+        "⚠️ *Перед началом работы ознакомьтесь с условиями использования*"
     )
+    
+    await bot.send_message(chat_id, text, parse_mode=ParseMode.MARKDOWN, reply_markup=markup)
 
 
-async def handle_withdraw_amount(message: types.Message, bot, db, user_state):
-    """Обработка ввода суммы вывода"""
+async def show_balance(message: types.Message, bot, db):
+    """Показать баланс пользователя"""
     user_id = message.from_user.id
-    data = user_state.get_data(user_id)
-    method = data.get('method')
+    user = db.get_user(user_id)
 
-    try:
-        amount = int(message.text)
-        if amount <= 0:
-            raise ValueError
-    except ValueError:
-        await bot.send_message(message.chat.id, "Пожалуйста, введите положительное целое число.")
-        return
-
-    min_amount = MIN_WITHDRAW_CARD if method == 'card' else MIN_WITHDRAW_PHONE
-    if amount < min_amount:
-        await bot.send_message(message.chat.id, f"Сумма должна быть не меньше {min_amount}₽.")
-        return
-
-    money = db.get_money_balance(user_id)
-    if amount > money:
-        await bot.send_message(message.chat.id, f"Недостаточно средств. Ваш баланс: {money}₽.")
-        return
-
-    user_state.update_data(user_id, amount=amount)
-    user_state.set_state(user_id, 'waiting_withdraw_details', **user_state.get_data(user_id))
-
-    if method == 'card':
-        await bot.send_message(message.chat.id, "Введите номер карты (16 цифр):")
+    if user:
+        status = "🔒 Заблокирован" if user['is_blocked'] else "✅ Разблокирован"
+        remaining = max(0, COMMENT_THRESHOLD - user['comment_balance']) if user['is_blocked'] else 0
+        
+        text = (
+            f"💰 *Твой баланс:*\n"
+            f"📝 Комментариев: {user['comment_balance']}\n"
+            f"🔒 Статус: {status}\n"
+        )
+        
+        if user['is_blocked']:
+            text += f"⏳ До разблокировки: {remaining} комментариев\n"
+        
+        text += (
+            f"💵 Денег: {user['money_balance']} руб.\n"
+            f"✅ Всего выполнено заданий: {user['tasks_completed']}"
+        )
     else:
-        await bot.send_message(message.chat.id, "Введите номер телефона (в любом формате):")
+        text = "Ошибка получения данных."
+
+    await bot.send_message(message.chat.id, text, parse_mode=ParseMode.MARKDOWN)
 
 
-async def handle_withdraw_details(message: types.Message, bot, db, user_state):
-    """Обработка ввода реквизитов для вывода"""
-    user_id = message.from_user.id
-    data = user_state.get_data(user_id)
-    method = data.get('method')
-    amount = data.get('amount')
-    details = message.text.strip()
-
-    # Валидация (простая)
-    if method == 'card':
-        # Удаляем возможные пробелы и проверяем, что остались только цифры и длина 16
-        card_number = ''.join(filter(str.isdigit, details))
-        if len(card_number) != 16:
-            await bot.send_message(
-                message.chat.id,
-                "Некорректный номер карты. Введите 16 цифр без пробелов."
-            )
-            return
-        details = card_number
-    else:
-        # Для телефона просто проверяем, что есть хотя бы одна цифра
-        if not any(c.isdigit() for c in details):
-            await bot.send_message(message.chat.id, "Пожалуйста, введите номер телефона.")
-            return
-
-    # Создаём заявку
-    db.create_withdrawal(user_id, amount, method, details)
-    user_state.clear_state(user_id)
-
-    await bot.send_message(
-        message.chat.id,
-        "✅ Заявка на вывод создана. Ожидайте решения администратора."
+async def send_help(message: types.Message, bot):
+    """Отправить справку"""
+    help_text = (
+        f"❓ *Помощь по боту {BOT_NAME}:*\n\n"
+        f"📝 *Проверить комментарий* — отправьте скриншот комментария с упоминанием @{BOT_NAME}, "
+        f"чтобы получить +1 к балансу комментариев.\n"
+        f"💰 *Мой баланс* — показывает текущие балансы и статус доступа.\n"
+        f"💎 *Вывод средств* — создайте заявку на вывод денег "
+        f"(минимум {MIN_WITHDRAW_CARD}₽ на карту, {MIN_WITHDRAW_PHONE}₽ на телефон).\n"
+        f"📊 *Статистика* — ваша личная статистика.\n"
+        f"❓ *Помощь* — это сообщение.\n\n"
+        f"🔒 *Система блокировки:*\n"
+        f"• Для разблокировки нужно {COMMENT_THRESHOLD} комментариев\n"
+        f"• Каждый понедельник списывается {WEEKLY_COMMENT_DECREMENT} комментариев\n"
+        f"• Если баланс станет 0 - доступ блокируется\n"
+        f"• Баланс не может уйти в минус\n\n"
+        f"📢 *Важно:* Для получения спонсорских предложений нужно "
+        f"предварительно прорекламировать бота!"
     )
-
-    # Уведомляем админов
-    for admin_id in ADMIN_IDS:
-        try:
-            await bot.send_message(
-                admin_id,
-                f"🔔 Новая заявка на вывод!\n"
-                f"Пользователь: {user_id}\n"
-                f"Сумма: {amount}₽\n"
-                f"Способ: {method}"
-            )
-        except Exception as e:
-            print(f"Не удалось уведомить админа {admin_id}: {e}")
-
-
-def register_handlers(dp: Dispatcher, bot, db, user_state):
-    """Регистрация обработчиков для вывода средств"""
-    
-    @dp.callback_query_handler(lambda call: call.data.startswith("withdraw_"))
-    async def withdraw_method(call: types.CallbackQuery):
-        await callback_withdraw_method(call, bot, db, user_state)
-    
-    @dp.message_handler(lambda message: user_state.has_state(message.from_user.id, 'waiting_withdraw_amount'))
-    async def withdraw_amount(message: types.Message):
-        await handle_withdraw_amount(message, bot, db, user_state)
-    
-    @dp.message_handler(lambda message: user_state.has_state(message.from_user.id, 'waiting_withdraw_details'))
-    async def withdraw_details(message: types.Message):
-        await handle_withdraw_details(message, bot, db, user_state)
+    await bot.send_message(message.chat.id, help_text, parse_mode=ParseMode.MARKDOWN)
