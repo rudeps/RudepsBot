@@ -8,9 +8,7 @@ import time
 import hashlib
 import aiofiles
 from aiogram import types, Dispatcher
-from aiogram.dispatcher import FSMContext
-from aiogram.dispatcher.filters import Text
-from aiogram.types import ParseMode, ReplyKeyboardMarkup, KeyboardButton
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
 
 from utils import check_flood, extract_text_from_image, get_main_keyboard
 from config import BOT_NAME, COMMENT_THRESHOLD, ANTIFLOOD_SECONDS, MAX_PHOTO_SIZE_MB
