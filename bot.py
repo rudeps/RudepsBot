@@ -28,11 +28,18 @@ import aioschedule
 
 # ==================== КОНФИГУРАЦИЯ ====================
 
+# Получаем токен из переменных окружения
+BOT_TOKEN = os.environ.get('BOT_TOKEN', os.environ.get('TELEGRAM_BOT_TOKEN', os.environ.get('TOKEN', '8526526327:AAF0FHqly8li_q6YDH36ilhSsDhUz5_fCl0')))
+
+# Получаем ID администраторов из переменных окружения
+admin_ids_str = os.environ.get('ADMIN_IDS', '8286237801')
+ADMIN_IDS = [int(id.strip()) for id in admin_ids_str.split(',') if id.strip().isdigit()]
+
 @dataclass
 class Config:
     """Конфигурация бота"""
-    BOT_TOKEN: str = "8287158555:AAGFJPPnaA9pRnicmQRJG6_jO63GWNfCvAk"
-    ADMIN_IDS: List[int] = field(default_factory=lambda: [8286237801])
+    BOT_TOKEN: str = BOT_TOKEN
+    ADMIN_IDS: List[int] = field(default_factory=lambda: ADMIN_IDS)
     BOT_NAME: str = "RudepsBot"
     DATABASE_FILE: str = "bot_database.db"
     LOG_FILE: str = "bot.log"
@@ -48,6 +55,9 @@ class Config:
     def __post_init__(self):
         if not self.BOT_TOKEN:
             raise ValueError("BOT_TOKEN не может быть пустым")
+
+# Создаем глобальный экземпляр конфига
+config = Config()
 
 # ==================== СОСТОЯНИЯ ====================
 
@@ -222,7 +232,7 @@ class Database:
     async def create_user(self, user_id: int, username: str, first_name: str, last_name: str) -> None:
         """Создать пользователя"""
         now = datetime.now()
-        is_admin = user_id in Config.ADMIN_IDS
+        is_admin = user_id in config.ADMIN_IDS
 
         await self._execute('''
             INSERT OR IGNORE INTO users
@@ -324,7 +334,7 @@ class Database:
         new_balance = row[0] if row else 0
 
         # Обновляем временную блокировку (если баланс ниже порога)
-        new_blocked = new_balance < Config.COMMENT_THRESHOLD
+        new_blocked = new_balance < config.COMMENT_THRESHOLD
         await self._execute(
             "UPDATE users SET is_blocked = ? WHERE user_id = ?",
             (new_blocked, user_id),
@@ -427,7 +437,7 @@ class Database:
         """Активных пользователей"""
         row = await self._execute(
             "SELECT COUNT(*) FROM users WHERE comment_balance >= ? AND is_permanently_banned = 0",
-            (Config.COMMENT_THRESHOLD,),
+            (config.COMMENT_THRESHOLD,),
             fetch_one=True
         )
         return row[0] if row else 0
@@ -565,8 +575,8 @@ class Database:
         )
 
         newly_blocked = []
-        threshold = Config.COMMENT_THRESHOLD
-        decrement = Config.WEEKLY_COMMENT_DECREMENT
+        threshold = config.COMMENT_THRESHOLD
+        decrement = config.WEEKLY_COMMENT_DECREMENT
 
         queries = []
         for user_id, balance in rows:
@@ -718,7 +728,7 @@ class Scheduler:
 
     async def start(self):
         self._running = True
-        aioschedule.every().monday.at(Config.SCHEDULE_TIME).do(self.weekly_check)
+        aioschedule.every().monday.at(config.SCHEDULE_TIME).do(self.weekly_check)
 
         while self._running:
             await aioschedule.run_pending()
@@ -745,9 +755,9 @@ class Scheduler:
             await self.bot.send_message(
                 user_id,
                 f"⛔ *ВНИМАНИЕ: доступ заблокирован!*\n\n"
-                f"Произошло еженедельное списание {Config.WEEKLY_COMMENT_DECREMENT} комментариев.\n"
+                f"Произошло еженедельное списание {config.WEEKLY_COMMENT_DECREMENT} комментариев.\n"
                 f"Ваш баланс стал {new_balance}.\n\n"
-                f"Чтобы разблокировать доступ, наберите {Config.COMMENT_THRESHOLD} комментариев "
+                f"Чтобы разблокировать доступ, наберите {config.COMMENT_THRESHOLD} комментариев "
                 f"через кнопку '📝 Проверить комментарий'.",
                 reply_markup=KeyboardFactory.main(True)
             )
@@ -860,7 +870,7 @@ class Handlers:
                 return
 
             status = "🔒 Заблокирован" if user['is_blocked'] else "✅ Разблокирован"
-            remaining = max(0, Config.COMMENT_THRESHOLD - user['comment_balance']) if user['is_blocked'] else 0
+            remaining = max(0, config.COMMENT_THRESHOLD - user['comment_balance']) if user['is_blocked'] else 0
 
             text = (
                 f"📊 *Твоя статистика:*\n"
@@ -901,9 +911,9 @@ class Handlers:
             await self.db.update_user_activity(user_id)
 
             if user['is_blocked'] and message.text != "📝 Проверить комментарий":
-                remaining = max(0, Config.COMMENT_THRESHOLD - user['comment_balance'])
+                remaining = max(0, config.COMMENT_THRESHOLD - user['comment_balance'])
                 await message.reply(
-                    f"⛔ Доступ временно заблокирован. Требуется {Config.COMMENT_THRESHOLD} комментариев.\n"
+                    f"⛔ Доступ временно заблокирован. Требуется {config.COMMENT_THRESHOLD} комментариев.\n"
                     f"📝 Баланс: {user['comment_balance']}\n⏳ Осталось: {remaining}",
                     reply_markup=KeyboardFactory.main(True)
                 )
@@ -1095,12 +1105,12 @@ class Handlers:
             return
 
         if blocked:
-            remaining = max(0, Config.COMMENT_THRESHOLD - user['comment_balance'])
+            remaining = max(0, config.COMMENT_THRESHOLD - user['comment_balance'])
             text = (
                 f"🔒 *Доступ заблокирован*\n\n"
                 f"📝 Текущий баланс: {user['comment_balance']}\n"
                 f"⏳ Осталось для разблокировки: {remaining}\n\n"
-                f"Отправляйте скриншоты с упоминанием @{Config.BOT_NAME} чтобы получить комментарии!"
+                f"Отправляйте скриншоты с упоминанием @{config.BOT_NAME} чтобы получить комментарии!"
             )
             await self.bot.send_message(chat_id, text, reply_markup=KeyboardFactory.main(True))
         else:
@@ -1116,7 +1126,7 @@ class Handlers:
         text = (
             f"🤖 *Добро пожаловать в RudepsBot!*\n\n"
             f"📱 *Что умеет бот:*\n"
-            f"• Проверка комментариев с упоминанием @{Config.BOT_NAME}\n"
+            f"• Проверка комментариев с упоминанием @{config.BOT_NAME}\n"
             f"• Накопление комментариев для доступа\n"
             f"• Выполнение заданий с наградой\n"
             f"• Вывод заработанных средств\n\n"
@@ -1124,12 +1134,12 @@ class Handlers:
             f"• За каждое задание: от 5 до 50₽\n"
             f"• В среднем: 500-1500₽ в неделю\n\n"
             f"📊 *Система комментариев:*\n"
-            f"• Для разблокировки нужно {Config.COMMENT_THRESHOLD} комментариев\n"
-            f"• Каждый понедельник списывается {Config.WEEKLY_COMMENT_DECREMENT} комментариев\n"
+            f"• Для разблокировки нужно {config.COMMENT_THRESHOLD} комментариев\n"
+            f"• Каждый понедельник списывается {config.WEEKLY_COMMENT_DECREMENT} комментариев\n"
             f"• Если баланс станет 0 - доступ блокируется\n\n"
             f"💳 *Вывод средств:*\n"
-            f"• На карту: от {Config.MIN_WITHDRAW_CARD}₽\n"
-            f"• На телефон: от {Config.MIN_WITHDRAW_PHONE}₽\n\n"
+            f"• На карту: от {config.MIN_WITHDRAW_CARD}₽\n"
+            f"• На телефон: от {config.MIN_WITHDRAW_PHONE}₽\n\n"
             f"⚠️ *За обман - пожизненный бан!*\n\n"
             f"❗️ Важно: любое отправленное фото сразу дает +1 комментарий, но если админ заметит обман - вы будете забанены навсегда."
         )
@@ -1141,7 +1151,7 @@ class Handlers:
         if not user:
             return
         status = "🔒 Заблокирован" if user['is_blocked'] else "✅ Разблокирован"
-        remaining = max(0, Config.COMMENT_THRESHOLD - user['comment_balance']) if user['is_blocked'] else 0
+        remaining = max(0, config.COMMENT_THRESHOLD - user['comment_balance']) if user['is_blocked'] else 0
 
         text = (
             f"💰 *Твой баланс:*\n"
@@ -1156,17 +1166,17 @@ class Handlers:
 
     async def _send_help(self, message: types.Message):
         help_text = (
-            f"❓ *Помощь по боту {Config.BOT_NAME}:*\n\n"
-            f"📝 *Проверить комментарий* — отправьте скриншот комментария с упоминанием @{Config.BOT_NAME}, "
+            f"❓ *Помощь по боту {config.BOT_NAME}:*\n\n"
+            f"📝 *Проверить комментарий* — отправьте скриншот комментария с упоминанием @{config.BOT_NAME}, "
             f"чтобы получить +1 к балансу комментариев.\n"
             f"💰 *Мой баланс* — показывает текущие балансы и статус доступа.\n"
             f"💎 *Вывод средств* — создайте заявку на вывод денег "
-            f"(минимум {Config.MIN_WITHDRAW_CARD}₽ на карту, {Config.MIN_WITHDRAW_PHONE}₽ на телефон).\n"
+            f"(минимум {config.MIN_WITHDRAW_CARD}₽ на карту, {config.MIN_WITHDRAW_PHONE}₽ на телефон).\n"
             f"📊 *Статистика* — ваша личная статистика.\n"
             f"❓ *Помощь* — это сообщение.\n\n"
             f"🔒 *Система блокировки:*\n"
-            f"• Для разблокировки нужно {Config.COMMENT_THRESHOLD} комментариев\n"
-            f"• Каждый понедельник списывается {Config.WEEKLY_COMMENT_DECREMENT} комментариев\n"
+            f"• Для разблокировки нужно {config.COMMENT_THRESHOLD} комментариев\n"
+            f"• Каждый понедельник списывается {config.WEEKLY_COMMENT_DECREMENT} комментариев\n"
             f"• Если баланс станет 0 - доступ блокируется\n\n"
             f"⚠️ *Важно:* За любое фото сразу начисляется +1 комментарий, но за обман - пожизненный бан!"
         )
@@ -1180,20 +1190,20 @@ class Handlers:
         # Антифлуд
         now = time.time()
         last = self._last_photo_time.get(user_id, 0)
-        if now - last < Config.ANTIFLOOD_SECONDS:
-            remaining = int(Config.ANTIFLOOD_SECONDS - (now - last))
+        if now - last < config.ANTIFLOOD_SECONDS:
+            remaining = int(config.ANTIFLOOD_SECONDS - (now - last))
             await message.reply(f"⏳ Слишком часто. Подождите {remaining} секунд.")
             return
 
         await self.state_manager.set_state(user_id, UserState.WAITING_PHOTO)
 
         await message.reply(
-            f"📸 Отправьте скриншот вашего комментария, содержащего упоминание @{Config.BOT_NAME}.\n\n"
+            f"📸 Отправьте скриншот вашего комментария, содержащего упоминание @{config.BOT_NAME}.\n\n"
             f"⚠️ *ВАЖНО:* За любое фото сразу начисляется +1 комментарий!\n"
             f"Если админ заметит обман (повторные фото, не те комментарии) - вы будете забанены навсегда.\n\n"
             f"Требования к фото:\n"
             f"• Формат: JPG, PNG\n"
-            f"• Максимальный размер: {Config.MAX_PHOTO_SIZE_MB} MB\n\n"
+            f"• Максимальный размер: {config.MAX_PHOTO_SIZE_MB} MB\n\n"
             f"Для отмены нажмите кнопку '❌ Отмена'",
             reply_markup=KeyboardFactory.cancel()
         )
@@ -1208,9 +1218,10 @@ class Handlers:
 
         # Проверка состояния
         if not await self.state_manager.has_state(user_id, UserState.WAITING_PHOTO):
+            user = await self.db.get_user(user_id)
             await message.reply(
                 "❌ Сначала нажмите кнопку '📝 Проверить комментарий' в меню.",
-                reply_markup=KeyboardFactory.main(await self.db.get_user(user_id)['is_blocked'])
+                reply_markup=KeyboardFactory.main(user['is_blocked'] if user else True)
             )
             return
 
@@ -1219,28 +1230,31 @@ class Handlers:
         # Антифлуд
         now = time.time()
         last = self._last_photo_time.get(user_id, 0)
-        if now - last < Config.ANTIFLOOD_SECONDS:
-            remaining = int(Config.ANTIFLOOD_SECONDS - (now - last))
+        if now - last < config.ANTIFLOOD_SECONDS:
+            remaining = int(config.ANTIFLOOD_SECONDS - (now - last))
+            user = await self.db.get_user(user_id)
             await message.reply(
                 f"⏳ Слишком часто. Подождите {remaining} секунд.",
-                reply_markup=KeyboardFactory.main(await self.db.get_user(user_id)['is_blocked'])
+                reply_markup=KeyboardFactory.main(user['is_blocked'] if user else True)
             )
             return
         self._last_photo_time[user_id] = now
 
         # Проверка фото
         if not message.photo:
+            user = await self.db.get_user(user_id)
             await message.reply(
                 "❌ Ошибка: фото не обнаружено.",
-                reply_markup=KeyboardFactory.main(await self.db.get_user(user_id)['is_blocked'])
+                reply_markup=KeyboardFactory.main(user['is_blocked'] if user else True)
             )
             return
 
         photo = message.photo[-1]
-        if photo.file_size > Config.MAX_PHOTO_SIZE:
+        if photo.file_size > config.MAX_PHOTO_SIZE:
+            user = await self.db.get_user(user_id)
             await message.reply(
-                f"❌ Файл слишком большой. Максимальный размер: {Config.MAX_PHOTO_SIZE_MB} MB.",
-                reply_markup=KeyboardFactory.main(await self.db.get_user(user_id)['is_blocked'])
+                f"❌ Файл слишком большой. Максимальный размер: {config.MAX_PHOTO_SIZE_MB} MB.",
+                reply_markup=KeyboardFactory.main(user['is_blocked'] if user else True)
             )
             return
 
@@ -1284,7 +1298,7 @@ class Handlers:
         )
 
         # Отправляем фото админу с логом (БЕЗ КНОПОК - только для информации)
-        for admin_id in Config.ADMIN_IDS:
+        for admin_id in config.ADMIN_IDS:
             try:
                 await self.bot.send_photo(admin_id, photo.file_id, caption=log_text, parse_mode=ParseMode.MARKDOWN)
             except Exception as e:
@@ -1292,7 +1306,7 @@ class Handlers:
 
         # Ответ пользователю
         if user['is_blocked']:
-            remaining = Config.COMMENT_THRESHOLD - new_balance
+            remaining = config.COMMENT_THRESHOLD - new_balance
             await processing_msg.edit_text(
                 f"✅ Комментарий засчитан!\n\n"
                 f"📝 Текущий баланс: {new_balance}\n"
@@ -1317,9 +1331,9 @@ class Handlers:
         user_id = message.from_user.id
         money = await self.db.get_money_balance(user_id)
 
-        if money < Config.MIN_WITHDRAW_CARD:
+        if money < config.MIN_WITHDRAW_CARD:
             await message.reply(
-                f"💤 Минимальная сумма вывода — {Config.MIN_WITHDRAW_CARD}₽. Твой баланс: {money}₽"
+                f"💤 Минимальная сумма вывода — {config.MIN_WITHDRAW_CARD}₽. Твой баланс: {money}₽"
             )
             return
 
@@ -1338,7 +1352,7 @@ class Handlers:
         await self.state_manager.set_state(user_id, UserState.WAITING_WITHDRAW_AMOUNT, method=method)
         await call.answer()
 
-        min_amount = Config.MIN_WITHDRAW_CARD if method == 'card' else Config.MIN_WITHDRAW_PHONE
+        min_amount = config.MIN_WITHDRAW_CARD if method == 'card' else config.MIN_WITHDRAW_PHONE
         await call.message.reply(
             f"Введите сумму для вывода (минимум {min_amount}₽, целое число):"
         )
@@ -1357,7 +1371,7 @@ class Handlers:
             await message.reply("Пожалуйста, введите положительное целое число.")
             return
 
-        min_amount = Config.MIN_WITHDRAW_CARD if method == 'card' else Config.MIN_WITHDRAW_PHONE
+        min_amount = config.MIN_WITHDRAW_CARD if method == 'card' else config.MIN_WITHDRAW_PHONE
         if amount < min_amount:
             await message.reply(f"Сумма должна быть не меньше {min_amount}₽.")
             return
@@ -1401,7 +1415,7 @@ class Handlers:
 
         # Уведомляем админов
         tasks = []
-        for admin_id in Config.ADMIN_IDS:
+        for admin_id in config.ADMIN_IDS:
             tasks.append(self.bot.send_message(
                 admin_id,
                 f"🔔 Новая заявка на вывод!\n"
@@ -1893,7 +1907,6 @@ class Handlers:
 
 async def main():
     """Главная функция"""
-    config = Config()
     logger = Logger(config.LOG_FILE)
 
     logger.info("=" * 50)
