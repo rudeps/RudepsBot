@@ -1,20 +1,12 @@
 # -*- coding: utf-8 -*-
 """
 Инициализация всех обработчиков
-Импортируем модули в правильном порядке, чтобы избежать циклических зависимостей
 """
 
-# Сначала импортируем общие обработчики (они не зависят от других)
-from . import common
+# Экспортируем функции регистрации для удобства
+from .common import register_handlers as register_common
+from .comment import register_handlers as register_comment
+from .withdraw import register_handlers as register_withdraw
+from .admin import register_handlers as register_admin
 
-# Затем комментарии (зависят от common)
-from . import comment
-
-# Затем вывод средств (зависят от common)
-from . import withdraw
-
-# Затем админку (зависит от всех)
-from . import admin
-
-# Экспортируем все для удобства
-__all__ = ['common', 'comment', 'withdraw', 'admin']
+__all__ = ['register_common', 'register_comment', 'register_withdraw', 'register_admin']
