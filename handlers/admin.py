@@ -15,6 +15,7 @@ from utils import (
     get_user_display_name, export_all_user_ids_to_file
 )
 from config import ADMIN_IDS
+import asyncio
 
 
 def register_handlers(dp: Dispatcher, bot, db, user_state):
@@ -610,3 +611,4 @@ def register_handlers(dp: Dispatcher, bot, db, user_state):
         user_state.clear_state(admin_id)
 
         await bot.send_message(admin_id, "✅ Заявка отклонена.")
+
